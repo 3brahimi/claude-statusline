@@ -195,7 +195,7 @@ line1_col1_w=${#line1_col1_plain}
 
 branch_plain_len=0
 [[ -n "$branch" ]] && branch_plain_len=$(( 2 + ${#branch} ))
-(( dirty_count > 0 && branch_plain_len > 0 )) && (( branch_plain_len++ ))
+(( dirty_count > 0 && branch_plain_len > 0 )) && (( branch_plain_len += 2 ))  # " ●" = 2 visible chars
 gap_len=0
 [[ -n "$branch" && -n "$cost_plain" ]] && gap_len=2
 line2_col1_plain_len=$(( branch_plain_len + gap_len + ${#cost_plain} ))
