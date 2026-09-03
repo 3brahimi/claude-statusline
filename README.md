@@ -22,7 +22,7 @@ A two-line status bar for Claude Code with color-coded usage metrics, cache hit 
 Run this command in PowerShell:
 
 ```powershell
-irm https://path/to/install.ps1 | iex
+irm https://raw.githubusercontent.com/3brahimi/claude-statusline/main/install.ps1 | iex
 ```
 
 Or locally:
@@ -36,7 +36,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 Run this command:
 
 ```bash
-curl -sSL https://path/to/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/3brahimi/claude-statusline/main/install.sh | bash
 ```
 
 Or locally:

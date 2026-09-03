@@ -1,6 +1,10 @@
 # Claude Code StatusLine — Windows 11 / pwsh
-# Line 1: model [effort]      │ ctx   bar pct [empty]   │ cache bar pct ↻reset
-# Line 2: ⎇ branch  $cost     │ 5h    bar pct ↻reset    │ 7d    bar pct ↻reset
+# Line 1: model [effort]     │ ctx   bar pct   │ 5h    bar pct ↻reset  │ rot bar pct
+# Line 2: ⎇ branch  $cost    │ cache bar pct   │ 7d    bar pct ↻reset  │ eff bar pct
+# Last column on each line: token-optimizer's own composite scores -- rot =
+# 100 - resource_health (line 1, irreversible/kill signal) and eff =
+# session_efficiency (line 2, recoverable/compact signal) -- gated on the
+# quality-cache existing.
 #         Both columns padded to COL1_MIN so │ separators align vertically
 #         COL1_MIN = max(line1 col1 plain width, line2 col1 plain width)
 
@@ -33,7 +37,7 @@ $SEP    = " ${sep_c}│${R} "
 
 # ── Bar constants ─────────────────────────────────────────────────────────────
 $BAR_W   = 8     # chars
-$LABEL_W = 5     # "ctx  " "5h   " "cache" "7d   "
+$LABEL_W = 5     # default; per-column widths passed to Segment override this
 $PCT_W   = 4     # " 63%"
 
 $FULL  = [char]0x2588   # █
@@ -71,9 +75,11 @@ function Time-Until([long]$epoch) {
 # Returns a colored segment: "LABEL bar pct [↻reset]"
 # $rstW = per-column reset width; 0 means no reset column rendered.
 # $invertColor: if $true, use Cache-Color (high = good) instead of Pct-Color (high = bad)
-function Segment([string]$label, [int]$pct, [string]$reset, [bool]$invertColor = $false, [int]$rstW = 0) {
+# $labelW = pad width for THIS column's label (max label length shared by the
+# rows in that column) -- defaults to the global $LABEL_W.
+function Segment([string]$label, [int]$pct, [string]$reset, [bool]$invertColor = $false, [int]$rstW = 0, [int]$labelW = $LABEL_W) {
     $c      = if ($invertColor) { Cache-Color $pct } else { Pct-Color $pct }
-    $lbl    = $label.PadRight($LABEL_W)
+    $lbl    = $label.PadRight($labelW)
     $bar    = Bar-Plain $pct
     $pctStr = $pct.ToString().PadLeft(3) + "%"   # " 63%"
     $rstStr = ""
@@ -114,27 +120,14 @@ try {
                   [math]::Round($d.context_window.used_percentage) } else { $null }
 
     # ── Cache hit rate ────────────────────────────────────────────────────────
+    # Always render when ctx data exists, even at 0 totalIn (e.g. right after
+    # compact) -- a missing segment there reads as "no cache stat", not "0%".
     $cu      = $d.context_window.current_usage
     $totalIn = [long]($cu.input_tokens) + [long]($cu.cache_read_input_tokens) + [long]($cu.cache_creation_input_tokens)
     $cacheHitPct = if ($totalIn -gt 0) {
                        [math]::Round(100 * [long]($cu.cache_read_input_tokens) / $totalIn)
-                   } else { $null }
-
-    # Track cache creation timestamp for 5-min TTL countdown
-    $cacheStamp = "$env:TEMP\claude-cache-stamp.txt"
-    $cacheReset = ""
-    if ([long]($cu.cache_creation_input_tokens) -gt 0) {
-        [DateTime]::UtcNow.ToString("o") | Set-Content $cacheStamp -NoNewline
-    }
-    if (Test-Path $cacheStamp) {
-        try {
-            $age  = ([DateTime]::UtcNow - [DateTime]::Parse((Get-Content $cacheStamp))).TotalSeconds
-            $left = 300 - $age
-            if ($left -gt 5) {
-                $cacheReset = "$([math]::Floor($left/60))m$([math]::Floor($left % 60).ToString('00'))s"
-            }
-        } catch {}
-    }
+                   } else { 0 }
+    $cacheHitOk = $null -ne $ctxPct
 
     # ── Git ───────────────────────────────────────────────────────────────────
     $cwd    = if ($d.workspace.current_dir) { $d.workspace.current_dir } else { "$PWD" }
@@ -158,11 +151,38 @@ try {
         $weekReset = Time-Until $d.rate_limits.seven_day.resets_at
     }
 
+    # ── Token Optimizer quality cache (1 extra column per line) ─────────────────
+    # token-optimizer already collapses its 7 signals into two weighted composites
+    # -- resource_health and session_efficiency. Use those directly instead of
+    # re-deriving a collapse from the sub-signals ourselves.
+    # rot = 100 - resource_health, shown plainly as rot (not health) -- default
+    # coloring, high rot = red. eff = session_efficiency, inverted (high = green).
+    # Both labels 3 chars so they pad identically on both lines.
+    $qualSeg1 = ""; $qualSeg2 = ""
+    $sessionId = "$($d.session_id)"
+    if ($sessionId) {
+        $safeSid = ($sessionId -replace '[^A-Za-z0-9_-]', '')
+        $qcache  = "$HOME\.claude\token-optimizer\quality-cache-$safeSid.json"
+        if ($safeSid -and (Test-Path $qcache)) {
+            try {
+                $q = Get-Content $qcache -Raw | ConvertFrom-Json
+                if ($null -ne $q.resource_health) {
+                    $qRes = [math]::Round($q.resource_health)
+                    $qualSeg1 = $SEP + (Segment "rot" (100 - $qRes) "" $false 0 3)
+                }
+                if ($null -ne $q.session_efficiency) {
+                    $qEff = [math]::Round($q.session_efficiency)
+                    $qualSeg2 = $SEP + (Segment "eff" $qEff "" $true 0 3)
+                }
+            } catch {}
+        }
+    }
+
     # ── Per-column RST widths — max reset-string visual width per column ────────
-    # Column 2: ctx (no reset) vs 5h; Column 3: cache vs 7d
+    # Column 2: ctx vs cache, neither ever shows a reset. Column 3: 5h vs 7d, both do.
     function Rst-Vis([string]$s) { if ($s) { return 2 + $s.Length } else { return 0 } }
-    $col2Rst = Rst-Vis $fiveReset
-    $col3Rst = [math]::Max((Rst-Vis $cacheReset), (Rst-Vis $weekReset))
+    $col2Rst = 0
+    $col3Rst = [math]::Max((Rst-Vis $fiveReset), (Rst-Vis $weekReset))
 
     # ── col1 plain widths — now we know branch/cost ───────────────────────────
     $line1col1Plain = $modelName
@@ -177,17 +197,18 @@ try {
     $col1W = [math]::Max($line1col1W, $line2col1PlainLen)
 
     # ══ LINE 1 ═══════════════════════════════════════════════════════════════
-    # model [effort]  (padded to col1W) │ ctx bar pct │ cache bar pct ↻reset
+    # model [effort]  (padded to col1W) │ ctx bar pct │ 5h bar pct ↻reset │ rot bar pct
     $line1 = "${modelColor}${bold}${modelName}${R}"
     if ($effortLabel) { $line1 += " ${effortColor}[${effortLabel}]${R}" }
     # Pad line1 col1 to col1W
     $pad1 = $col1W - $line1col1W
     if ($pad1 -gt 0) { $line1 += " " * $pad1 }
-    if ($null -ne $ctxPct)      { $line1 += $SEP + (Segment "ctx"   $ctxPct      ""           $false $col2Rst) }
-    if ($null -ne $cacheHitPct) { $line1 += $SEP + (Segment "cache" $cacheHitPct $cacheReset  $true  $col3Rst) }
+    if ($null -ne $ctxPct)   { $line1 += $SEP + (Segment "ctx" $ctxPct  ""         $false $col2Rst 5) }
+    if ($null -ne $fivePct)  { $line1 += $SEP + (Segment "5h"  $fivePct $fiveReset $false $col3Rst 2) }
+    $line1 += $qualSeg1
 
     # ══ LINE 2 ═══════════════════════════════════════════════════════════════
-    # ⎇ branch  $cost (padded to col1W) │ 5h bar pct ↻reset │ 7d bar pct ↻reset
+    # ⎇ branch  $cost (padded to col1W) │ cache bar pct │ 7d bar pct ↻reset │ eff bar pct
     $line2col1 = ""
     if ($branch) {
         $dirtyStr   = if ($dirty) { " ${orange}●${R}" } else { "" }
@@ -200,11 +221,12 @@ try {
     if ($pad2 -gt 0) { $line2col1 += " " * $pad2 }
 
     $line2 = $line2col1
-    if ($null -ne $fivePct) { $line2 += $SEP + (Segment "5h"  $fivePct $fiveReset $false $col2Rst) }
-    if ($null -ne $weekPct) { $line2 += $SEP + (Segment "7d"  $weekPct $weekReset $false $col3Rst) }
+    if ($cacheHitOk)         { $line2 += $SEP + (Segment "cache" $cacheHitPct "" $true  $col2Rst 5) }
+    if ($null -ne $weekPct)  { $line2 += $SEP + (Segment "7d"    $weekPct $weekReset $false $col3Rst 2) }
+    $line2 += $qualSeg2
 
     # ══ Emit ══════════════════════════════════════════════════════════════════
-    $hasLine2 = ($branch -or $costPlain -or $null -ne $fivePct -or $null -ne $weekPct)
+    $hasLine2 = ($branch -or $costPlain -or $cacheHitOk -or $null -ne $weekPct -or $qualSeg2)
     $out = $line1
     if ($hasLine2) { $out += "`n" + $line2 }
 

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Claude Code StatusLine — bash/Linux
-# Line 1: model [effort]     │ ctx   bar pct          │ cache bar pct ↻ reset
-# Line 2: ⎇ branch  $cost    │ 5h    bar pct ↻ reset  │ 7d    bar pct ↻ reset
+# Line 1: model [effort]     │ ctx   bar pct   │ 5h    bar pct ↻ reset │ rot bar pct
+# Line 2: ⎇ branch  $cost    │ cache bar pct   │ 7d    bar pct ↻ reset │ eff bar pct
+# Last column on each line: token-optimizer's own composite scores -- rot =
+# 100 - resource_health (line 1, irreversible/kill signal) and eff =
+# session_efficiency (line 2, recoverable/compact signal) -- gated on the
+# quality-cache existing.
 # Requires: jq, git
 
 input=$(cat)
@@ -70,25 +74,35 @@ time_until() {
     fi
 }
 
-# segment LABEL PCT RESET [INVERT] [RST_W]
+# segment LABEL PCT RESET [INVERT] [RST_W] [LABEL_W]
 # RST_W = per-column reset width; 0 means no reset column rendered.
+# LABEL_W = pad width for THIS column's label, i.e. max label length across
+# the rows that share this column (not a single global width) — default
+# falls back to the global LABEL_W for any caller that doesn't pass one.
 # INVERT=1 → use cache_color (high = good); omit or 0 → pct_color (high = bad)
 segment() {
-    local label=$1 pct=$2 reset=$3 invert=${4:-0} rst_w=${5:-0}
+    local label=$1 pct=$2 reset=$3 invert=${4:-0} rst_w=${5:-0} label_w=${6:-$LABEL_W}
     local c
     if [[ "$invert" == "1" ]]; then c=$(cache_color "$pct")
     else                             c=$(pct_color   "$pct")
     fi
-    local lbl; printf -v lbl "%-${LABEL_W}s" "$label"
+    local lbl; printf -v lbl "%-${label_w}s" "$label"
     local bar; bar=$(bar_plain "$pct")
     local pct_str; printf -v pct_str "%3d%%" "$pct"
     local rst_str=""
     if (( rst_w > 0 )); then
         if [[ -n "$reset" ]]; then
-            local r_plain; printf -v r_plain "%-${rst_w}s" "↻ $reset"
-            rst_str=" ${white}${r_plain}${R}"
+            # Manual char-width padding, not printf %-Ns: "↻" is multi-byte
+            # UTF-8, so printf pads by byte length and silently under-pads,
+            # drifting every column after this one out of alignment.
+            local r_plain="↻ $reset"
+            local pad=$(( rst_w - ${#r_plain} )) pad_str="" i
+            (( pad < 0 )) && pad=0
+            for ((i=0; i<pad; i++)); do pad_str+=" "; done
+            rst_str=" ${white}${r_plain}${pad_str}${R}"
         else
-            local r_empty; printf -v r_empty "%-${rst_w}s" ""
+            local r_empty="" i
+            for ((i=0; i<rst_w; i++)); do r_empty+=" "; done
             rst_str=" ${r_empty}"
         fi
     fi
@@ -123,6 +137,8 @@ cost_raw=$(   jq_num '.cost.total_cost_usd')
 cwd=$(        jq_get '.workspace.current_dir')
 [[ -z "$cwd" ]] && cwd="$PWD"
 
+session_id_raw=$(jq_get '.session_id')
+
 # ── Model color ───────────────────────────────────────────────────────────────
 model_lower="${model_name,,}"
 if   [[ "$model_lower" =~ haiku|small|mini|lite ]]; then model_color="$yellow"
@@ -144,27 +160,13 @@ esac
 # (set below, after git and cost sections)
 
 # ── Cache hit rate ────────────────────────────────────────────────────────────
+# Always render when ctx data exists, even at 0 total_in (e.g. right after
+# compact) -- a missing segment there reads as "no cache stat", not "0%".
 cache_hit_pct=0; cache_hit_ok=""
 if (( total_in > 0 )); then
     cache_hit_pct=$(( (cache_read * 100) / total_in ))
-    cache_hit_ok="yes"
 fi
-
-# Track cache creation for 5-min TTL countdown
-cache_stamp="/tmp/claude-cache-stamp.txt"
-cache_reset_str=""
-if (( cache_new > 0 )); then
-    date +%s > "$cache_stamp"
-fi
-if [[ -f "$cache_stamp" ]]; then
-    stamp_time=$(cat "$cache_stamp")
-    now_time=$(date +%s)
-    age=$(( now_time - stamp_time ))
-    left=$(( 300 - age ))
-    if (( left > 5 )); then
-        printf -v cache_reset_str '%dm%02ds' "$(( left / 60 ))" "$(( left % 60 ))"
-    fi
-fi
+[[ -n "$ctx_ok" ]] && cache_hit_ok="yes"
 
 # ── Git ───────────────────────────────────────────────────────────────────────
 branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
@@ -181,11 +183,35 @@ five_reset_str=""; week_reset_str=""
 [[ -n "$five_ok" && "$five_epoch" -gt 0 ]] && five_reset_str=$(time_until "$five_epoch")
 [[ -n "$week_ok" && "$week_epoch" -gt 0 ]] && week_reset_str=$(time_until "$week_epoch")
 
+# ── Token Optimizer quality cache (1 extra column per line) ───────────────────
+# token-optimizer already collapses its 7 signals into two weighted composites
+# -- resource_health (monotonic, irreversible: fill degradation 0.50 +
+# compaction depth 0.30 + waste tokens 0.20) and session_efficiency (rolling,
+# recoverable: stale reads 0.30 + bloated results 0.30 + decision density 0.20
+# + agent efficiency 0.20). Use those directly instead of re-deriving a
+# collapse from the sub-signals ourselves.
+# rot = 100 - resource_health, shown plainly as rot (not health) -- default
+# coloring, high rot = red, no inversion needed. eff = session_efficiency,
+# inverted (high = green). Both labels 3 chars so they pad identically to
+# LABEL_W=5 on both lines -- a longer label here would widen one line's
+# column and misalign everything after it on the other line.
+qual_seg1=""; qual_seg2=""
+if [[ -n "$session_id_raw" ]]; then
+    safe_sid=$(printf '%s' "$session_id_raw" | tr -cd 'A-Za-z0-9_-')
+    qcache="$HOME/.claude/token-optimizer/quality-cache-${safe_sid}.json"
+    if [[ -n "$safe_sid" && -f "$qcache" ]]; then
+        q_res=$(jq -r '(.resource_health | round) // empty'   "$qcache" 2>/dev/null)
+        q_eff=$(jq -r '(.session_efficiency | round) // empty' "$qcache" 2>/dev/null)
+        [[ -n "$q_res" ]] && qual_seg1="${SEP}$(segment 'rot' "$(( 100 - q_res ))" '' 0 0 3)"
+        [[ -n "$q_eff" ]] && qual_seg2="${SEP}$(segment 'eff' "$q_eff" '' 1 0 3)"
+    fi
+fi
+
 # ── Per-column RST widths — max of reset-string visual widths in that column ──
-# Column 2: ctx (no reset) vs 5h; Column 3: cache vs 7d
+# Column 2: ctx vs cache, neither ever shows a reset. Column 3: 5h vs 7d, both do.
 rst_vis() { local s="$1"; (( ${#s} > 0 )) && echo $(( 2 + ${#s} )) || echo 0; }
-col2_rst=$(rst_vis "$five_reset_str")
-c3a=$(rst_vis "$cache_reset_str"); c3b=$(rst_vis "$week_reset_str")
+col2_rst=0
+c3a=$(rst_vis "$five_reset_str"); c3b=$(rst_vis "$week_reset_str")
 col3_rst=$(( c3a > c3b ? c3a : c3b ))
 
 # ── col1 plain widths — now we know model, effort, branch, cost ───────────────
@@ -209,8 +235,9 @@ line1="${model_color}${bold}${model_name}${R}"
 # Pad line1 col1 to col1_w
 pad1=$(( col1_w - line1_col1_w ))
 for ((i=0; i<pad1; i++)); do line1+=" "; done
-[[ -n "$ctx_ok"       ]] && line1+="${SEP}$(segment 'ctx'   "$ctx_pct"       ''                0 "$col2_rst")"
-[[ -n "$cache_hit_ok" ]] && line1+="${SEP}$(segment 'cache' "$cache_hit_pct" "$cache_reset_str" 1 "$col3_rst")"
+[[ -n "$ctx_ok"  ]] && line1+="${SEP}$(segment 'ctx' "$ctx_pct"  ''                0 "$col2_rst" 5)"
+[[ -n "$five_ok" ]] && line1+="${SEP}$(segment '5h'  "$five_pct" "$five_reset_str" 0 "$col3_rst" 2)"
+line1+="$qual_seg1"
 
 # ══ LINE 2 ════════════════════════════════════════════════════════════════════
 line2_col1=""
@@ -226,13 +253,14 @@ pad2=$(( col1_w - line2_col1_plain_len ))
 for ((i=0; i<pad2; i++)); do line2_col1+=" "; done
 
 line2="$line2_col1"
-[[ -n "$five_ok" ]] && line2+="${SEP}$(segment '5h' "$five_pct" "$five_reset_str" 0 "$col2_rst")"
-[[ -n "$week_ok" ]] && line2+="${SEP}$(segment '7d' "$week_pct" "$week_reset_str" 0 "$col3_rst")"
+[[ -n "$cache_hit_ok" ]] && line2+="${SEP}$(segment 'cache' "$cache_hit_pct" '' 1 "$col2_rst" 5)"
+[[ -n "$week_ok"      ]] && line2+="${SEP}$(segment '7d'    "$week_pct"      "$week_reset_str"  0 "$col3_rst" 2)"
+line2+="$qual_seg2"
 
 # ══ Emit ══════════════════════════════════════════════════════════════════════
 out="$line1"
 has_line2=false
-[[ -n "$branch" || -n "$cost_plain" || -n "$five_ok" || -n "$week_ok" ]] && has_line2=true
+[[ -n "$branch" || -n "$cost_plain" || -n "$cache_hit_ok" || -n "$week_ok" || -n "$qual_seg2" ]] && has_line2=true
 $has_line2 && out+=$'\n'"$line2"
 
 printf '%s' "$out"
