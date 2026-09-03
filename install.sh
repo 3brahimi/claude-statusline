@@ -8,9 +8,10 @@ set -e
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS_PATH="$CLAUDE_DIR/settings.json"
 SCRIPT_PATH="$CLAUDE_DIR/statusline-command.sh"
-SCRIPT_URL="https://raw.githubusercontent.com/YOUR_REPO_HERE/statusline-command.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/3brahimi/claude-statusline/main/statusline-command.sh"
 
-# Detect if running from script dir or need to download
+# Detect if running from script dir or need to download (piped via curl|bash,
+# BASH_SOURCE[0] resolves to the cwd, so a real local script won't be there)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_SCRIPT="$SCRIPT_DIR/statusline-command.sh"
 
@@ -28,7 +29,8 @@ if [[ -f "$LOCAL_SCRIPT" ]]; then
     cp "$LOCAL_SCRIPT" "$SCRIPT_PATH"
     info "Copied statusline script to: $SCRIPT_PATH"
 else
-    error "statusline-command.sh not found in $SCRIPT_DIR"
+    curl -sSL "$SCRIPT_URL" -o "$SCRIPT_PATH" || error "Failed to download statusline script from $SCRIPT_URL"
+    info "Downloaded statusline script to: $SCRIPT_PATH"
 fi
 
 # Make it executable

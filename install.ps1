@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 $settingsPath = Join-Path $claudeDir "settings.json"
 $scriptPath = Join-Path $claudeDir "statusline-command.ps1"
-$scriptURL = "https://raw.githubusercontent.com/YOUR_REPO_HERE/statusline-command.ps1"
+$scriptURL = "https://raw.githubusercontent.com/3brahimi/claude-statusline/main/statusline-command.ps1"
 
 function Write-Info([string]$msg) {
     if (-not $Quiet) { Write-Host "✓ $msg" -ForegroundColor Green }
@@ -31,15 +31,16 @@ try {
     }
 
     # ── Download/copy statusline script ───────────────────────────────────────
-    # If running locally, copy from script dir; otherwise download
-    $scriptSource = $PSScriptRoot
-    $localScript = Join-Path $scriptSource "statusline-command.ps1"
+    # If running locally (has a script dir), copy from there; otherwise this is
+    # a remote `irm | iex` run ($PSScriptRoot is empty) — download it instead.
+    $localScript = if ($PSScriptRoot) { Join-Path $PSScriptRoot "statusline-command.ps1" } else { $null }
 
-    if (Test-Path $localScript) {
+    if ($localScript -and (Test-Path $localScript)) {
         Copy-Item $localScript $scriptPath -Force
         Write-Info "Copied statusline script to: $scriptPath"
     } else {
-        Write-Error-Custom "statusline-command.ps1 not found in $scriptSource"
+        Invoke-WebRequest -Uri $scriptURL -OutFile $scriptPath -UseBasicParsing
+        Write-Info "Downloaded statusline script to: $scriptPath"
     }
 
     # ── Update settings.json ──────────────────────────────────────────────────
