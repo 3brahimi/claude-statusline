@@ -132,7 +132,8 @@ try {
     # ── Git ───────────────────────────────────────────────────────────────────
     $cwd    = if ($d.workspace.current_dir) { $d.workspace.current_dir } else { "$PWD" }
     $branch = (git -C $cwd branch --show-current 2>$null) -join ""
-    $dirty  = (git -C $cwd status --porcelain 2>$null | Measure-Object).Count -gt 0
+    # --no-optional-locks: never take index.lock; --ignore-submodules=dirty: skip submodule scans.
+    $dirty  = (git --no-optional-locks -C $cwd status --porcelain --ignore-submodules=dirty 2>$null | Measure-Object).Count -gt 0
 
     # ── Cost ─────────────────────────────────────────────────────────────────
     $costUsd   = $d.cost.total_cost_usd

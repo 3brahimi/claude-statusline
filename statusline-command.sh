@@ -170,7 +170,9 @@ fi
 
 # ── Git ───────────────────────────────────────────────────────────────────────
 branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
-dirty_count=$(git -C "$cwd" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+# --no-optional-locks: never take index.lock (would block rebase/commit in the
+# same repo); --ignore-submodules=dirty: skip per-submodule status runs.
+dirty_count=$(git --no-optional-locks -C "$cwd" status --porcelain --ignore-submodules=dirty 2>/dev/null | wc -l | tr -d ' ')
 
 # ── Cost ──────────────────────────────────────────────────────────────────────
 cost_plain=""
